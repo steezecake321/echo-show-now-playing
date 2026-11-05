@@ -1,0 +1,9 @@
+service echo_spotify /system/bin/sh /data/local/echo-spotify/start_all.sh
+    class late_start
+    user root
+    group root inet
+    seclabel u:r:su:s0
+    disabled
+
+on property:sys.boot_completed=1
+    start echo_spotify

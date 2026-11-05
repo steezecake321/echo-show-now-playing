@@ -1,0 +1,7 @@
+build/
+local.env
+*.keystore
+*.jks
+*.idsig
+device/config.env
+__pycache__/
