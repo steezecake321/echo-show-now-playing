@@ -15,6 +15,16 @@ Turn a rooted **Amazon Echo Show 5** (codename *checkers*, running LineageOS 18.
   and stays out of the way when another app is in front.
 - Everything starts at boot.
 
+| Now Playing | Device picker |
+|---|---|
+| ![Now Playing screen](docs/screenshots/player.png) | ![Device picker](docs/screenshots/devices.png) |
+
+| Notification shade |
+|---|
+| ![Notification shade media controls](docs/screenshots/shade.png) |
+
+The screensaver shows this same Now Playing view.
+
 The receiver is Spotify's official headless Connect client, **Soloist**, so playback, login and
 audio keys work the way Spotify intends (no reverse-engineered protocol).
 
