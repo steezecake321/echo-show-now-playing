@@ -126,6 +126,8 @@ public class MainActivity extends Activity implements PlayerState.Listener, Time
             if (android.os.Build.VERSION.SDK_INT >= 27) setTurnScreenOn(true);
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         }
+        String album = intent.getStringExtra("album_url");
+        if (album != null && !album.trim().isEmpty()) PhotoAlbum.setAlbumUrl(this, album);
         String clientId = intent.getStringExtra("client_id");
         if (clientId != null && !clientId.trim().isEmpty()) {
             SpotifyWebApi.setClientId(this, clientId);

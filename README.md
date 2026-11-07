@@ -125,6 +125,19 @@ adb shell settings put secure screensaver_activate_on_sleep 1
 
 Add the widget from the launcher's widget list.
 
+**Photo screensaver (optional).** `PhotoDream` plays the pictures of a Google Photos album that is
+shared with a link (Google closed its official API to existing albums in 2025, so this reads the
+public share page; it needs no sign-in but is unofficial and could stop working if Google changes
+that page). Anyone with the link can view the album. Give the app the link, then pick it as the
+screensaver:
+
+```bash
+adb shell am start -n com.adam.nowplaying/.MainActivity --es album_url "https://photos.app.goo.gl/<your-link>"
+adb shell settings put secure screensaver_components com.adam.nowplaying/com.adam.nowplaying.PhotoDream
+```
+
+Use `com.adam.nowplaying.NowPlayingDream` instead to go back to the Now Playing screensaver.
+
 ### 3. Library, search and device picker (optional)
 
 Link your Spotify developer app and start the one-time sign-in; Firefox opens on the Echo, and
@@ -150,6 +163,7 @@ src/com/adam/nowplaying/
   MainActivity      full-screen app, device picker, Echo/home buttons
   NowPlayingDream   screensaver
   NowPlayingWidget  home-screen widget
+  PhotoDream        photo-album screensaver (PhotoAlbum reads the shared-album link)
   SpotifyWebApi     PKCE sign-in, device list, transfer, track lookup, library/search/play calls
   LibraryPanel      library, search and queue browser; Pins stores the pinned presets
   ToolsPanel        sleep timer, kitchen timers, wake-up alarm; Timers/AlarmReceiver run them
