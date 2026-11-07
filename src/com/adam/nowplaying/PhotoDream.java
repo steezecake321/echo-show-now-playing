@@ -1,15 +1,20 @@
 package com.adam.nowplaying;
 
+import android.animation.ObjectAnimator;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.graphics.Matrix;
+import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Handler;
 import android.os.Looper;
 import android.service.dreams.DreamService;
 import android.text.format.DateFormat;
-import android.util.TypedValue;
+import android.view.GestureDetector;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.animation.LinearInterpolator;
 import android.widget.FrameLayout;
@@ -20,26 +25,37 @@ import android.widget.TextView;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** Screensaver that plays the pictures of a shared Google Photos album, with the clock and what is playing. */
+/**
+ * Screensaver that plays the pictures of a shared Google Photos album, with the clock and what is playing.
+ * Swipe left/right for the next/previous picture, tap for controls, double-tap to open Now Playing.
+ */
 public class PhotoDream extends DreamService implements PlayerState.Listener {
 
     private static final long SHOW_MS = 12_000;
     private static final long FADE_MS = 1_400;
+    private static final long CONTROLS_MS = 6_000;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private ImageView front, back;
-    private TextView clock, now, message;
+    private TextView clock, now, message, pausePill;
+    private View controls, musicRow;
+    private ImageView playPause;
     private List<String> urls;
+    private final List<String> history = new ArrayList<>();
+    private int histPos = -1;
     private int index;
     private Bitmap ready;          // downloaded and waiting for its turn
+    private String readyUrl;
     private boolean fetching;
+    private boolean paused;
     private volatile boolean alive;
     private int w, h;
 
@@ -68,8 +84,7 @@ public class PhotoDream extends DreamService implements PlayerState.Listener {
         LinearLayout info = new LinearLayout(this);
         info.setOrientation(LinearLayout.VERTICAL);
         info.setPadding(Ui.dp(this, 22), Ui.dp(this, 10), Ui.dp(this, 22), Ui.dp(this, 16));
-        info.setBackground(new android.graphics.drawable.GradientDrawable(
-                android.graphics.drawable.GradientDrawable.Orientation.BOTTOM_TOP,
+        info.setBackground(new GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP,
                 new int[]{Color.argb(170, 0, 0, 0), Color.TRANSPARENT}));
         clock = Ui.text(this, 34, Color.WHITE, "sans-serif-light", 1);
         clock.setShadowLayer(8, 0, 2, Color.BLACK);
@@ -83,10 +98,34 @@ public class PhotoDream extends DreamService implements PlayerState.Listener {
         message.setGravity(Gravity.CENTER);
         root.addView(message, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
 
-        root.setOnClickListener(v -> {
-            startActivity(new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-            wakeUp();
+        buildControls(root);
+
+        final GestureDetector gestures = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
+            @Override public boolean onDown(MotionEvent e) { return true; }
+
+            @Override
+            public boolean onSingleTapConfirmed(MotionEvent e) {
+                toggleControls();
+                return true;
+            }
+
+            @Override
+            public boolean onDoubleTap(MotionEvent e) {
+                openApp();
+                return true;
+            }
+
+            @Override
+            public boolean onFling(MotionEvent a, MotionEvent b, float vx, float vy) {
+                if (a == null || b == null) return false;
+                float dx = b.getX() - a.getX(), dy = b.getY() - a.getY();
+                if (Math.abs(dx) < Ui.dp(PhotoDream.this, 60) || Math.abs(dx) < Math.abs(dy) * 1.5f) return false;
+                if (dx < 0) step(1);
+                else step(-1);
+                return true;
+            }
         });
+        root.setOnTouchListener((v, e) -> gestures.onTouchEvent(e));
         setContentView(root);
 
         PlayerState.get().addListener(this);
@@ -104,11 +143,11 @@ public class PhotoDream extends DreamService implements PlayerState.Listener {
                 message.setText(err);
                 return;
             }
-            urls = new java.util.ArrayList<>(list);
+            urls = new ArrayList<>(list);
             Collections.shuffle(urls);
             message.setVisibility(View.GONE);
             prefetch();
-            ui.postDelayed(this::advance, 600);
+            ui.postDelayed(advanceRun, 600);
         });
     }
 
@@ -125,6 +164,106 @@ public class PhotoDream extends DreamService implements PlayerState.Listener {
         ready = null;
     }
 
+    // ---------- controls ----------
+
+    private void buildControls(FrameLayout root) {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.VERTICAL);
+        bar.setGravity(Gravity.CENTER_HORIZONTAL);
+        bar.setPadding(Ui.dp(this, 16), Ui.dp(this, 14), Ui.dp(this, 16), Ui.dp(this, 26));
+        bar.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{Color.argb(200, 0, 0, 0), Color.TRANSPARENT}));
+
+        LinearLayout photos = new LinearLayout(this);
+        photos.setGravity(Gravity.CENTER);
+        photos.addView(pill("‹ Previous", () -> step(-1)));
+        pausePill = pill("Pause photos", this::togglePause);
+        photos.addView(pausePill);
+        photos.addView(pill("Next ›", () -> step(1)));
+        photos.addView(pill("Now Playing", this::openApp));
+        photos.addView(pill("Exit", this::wakeUp));
+        bar.addView(photos);
+
+        LinearLayout music = new LinearLayout(this);
+        music.setGravity(Gravity.CENTER);
+        music.setPadding(0, Ui.dp(this, 10), 0, 0);
+        music.addView(icon(R.drawable.ic_prev, () -> PlayerService.command(this, "skip_prev")));
+        playPause = icon(R.drawable.ic_pause, () -> PlayerService.togglePlay(this));
+        music.addView(playPause);
+        music.addView(icon(R.drawable.ic_next, () -> PlayerService.command(this, "skip_next")));
+        bar.addView(music);
+        musicRow = music;
+
+        bar.setVisibility(View.GONE);
+        bar.setClickable(true);
+        root.addView(bar, new FrameLayout.LayoutParams(-1, -2, Gravity.TOP));
+        controls = bar;
+    }
+
+    private TextView pill(String label, Runnable tap) {
+        TextView t = Ui.pill(this, label, false);
+        t.setBackground(Ui.round(this, Color.argb(120, 40, 40, 44), 20));
+        t.setOnClickListener(v -> {
+            tap.run();
+            showControls();
+        });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+        lp.leftMargin = Ui.dp(this, 4);
+        lp.rightMargin = Ui.dp(this, 4);
+        t.setLayoutParams(lp);
+        return t;
+    }
+
+    private ImageView icon(int res, Runnable tap) {
+        ImageView v = new ImageView(this);
+        v.setImageResource(res);
+        v.setColorFilter(Color.WHITE);
+        int pad = Ui.dp(this, 8);
+        v.setPadding(pad, pad, pad, pad);
+        v.setBackground(Ui.round(this, Color.argb(120, 40, 40, 44), 24));
+        v.setOnClickListener(x -> {
+            tap.run();
+            showControls();
+        });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(Ui.dp(this, 48), Ui.dp(this, 48));
+        lp.leftMargin = Ui.dp(this, 8);
+        lp.rightMargin = Ui.dp(this, 8);
+        v.setLayoutParams(lp);
+        return v;
+    }
+
+    private final Runnable hideControls = () -> controls.setVisibility(View.GONE);
+
+    private void toggleControls() {
+        if (controls.getVisibility() == View.VISIBLE) {
+            ui.removeCallbacks(hideControls);
+            controls.setVisibility(View.GONE);
+        } else {
+            showControls();
+        }
+    }
+
+    private void showControls() {
+        onStateChanged();
+        controls.setVisibility(View.VISIBLE);
+        ui.removeCallbacks(hideControls);
+        ui.postDelayed(hideControls, CONTROLS_MS);
+    }
+
+    private void openApp() {
+        startActivity(new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        wakeUp();
+    }
+
+    private void togglePause() {
+        paused = !paused;
+        pausePill.setText(paused ? "Resume photos" : "Pause photos");
+        ui.removeCallbacks(advanceRun);
+        if (!paused) ui.postDelayed(advanceRun, SHOW_MS);
+    }
+
+    // ---------- state ----------
+
     private final Runnable tickClock = new Runnable() {
         @Override
         public void run() {
@@ -137,96 +276,139 @@ public class PhotoDream extends DreamService implements PlayerState.Listener {
     @Override
     public void onStateChanged() {
         PlayerState s = PlayerState.get();
-        if (s.hasTrack() && s.isPlaying()) {
+        boolean music = s.hasTrack();
+        if (music && s.isPlaying()) {
             now.setText(s.trackName + "  ·  " + s.artists);
             now.setVisibility(View.VISIBLE);
         } else {
             now.setVisibility(View.GONE);
         }
+        musicRow.setVisibility(music ? View.VISIBLE : View.GONE);
+        playPause.setImageResource(s.isPlaying() ? R.drawable.ic_pause : R.drawable.ic_play);
     }
+
+    // ---------- slideshow ----------
 
     /** Downloads the next picture in the background so the change is instant. */
     private void prefetch() {
-        if (fetching || urls == null || !alive) return;
+        if (fetching || ready != null || urls == null || !alive) return;
         fetching = true;
-        final String url = PhotoAlbum.sized(urls.get(index % urls.size()), w, h);
+        final String base = urls.get(index % urls.size());
         index++;
-        try {
-            io.execute(() -> {
-                Bitmap b = null;
-                try {
-                    HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
-                    c.setConnectTimeout(10000);
-                    c.setReadTimeout(20000);
-                    InputStream in = c.getInputStream();
-                    b = BitmapFactory.decodeStream(in);
-                    in.close();
-                } catch (Exception ignored) {
+        io.execute(() -> {
+            final Bitmap got = download(base);
+            ui.post(() -> {
+                fetching = false;
+                if (!alive) return;
+                if (got == null) {
+                    prefetch();         // skip pictures that fail and try the next one
+                    return;
                 }
-                final Bitmap got = b;
-                ui.post(() -> {
-                    fetching = false;
-                    if (!alive) return;
-                    if (got == null) {
-                        prefetch();         // skip pictures that fail and try the next one
-                        return;
-                    }
-                    ready = got;
-                });
+                ready = got;
+                readyUrl = base;
             });
+        });
+    }
+
+    private Bitmap download(String base) {
+        try {
+            HttpURLConnection c = (HttpURLConnection) new URL(PhotoAlbum.sized(base, w, h)).openConnection();
+            c.setConnectTimeout(10000);
+            c.setReadTimeout(20000);
+            InputStream in = c.getInputStream();
+            Bitmap b = BitmapFactory.decodeStream(in);
+            in.close();
+            return b;
         } catch (Exception e) {
-            fetching = false;
+            return null;
         }
     }
 
-    /** Fills the screen like center-crop, but keeps the upper part of tall pictures so heads stay in frame. */
-    private android.graphics.Matrix cropMatrix(Bitmap b) {
-        float scale = Math.max(w / (float) b.getWidth(), h / (float) b.getHeight());
-        float dx = (w - b.getWidth() * scale) / 2f;
-        float dy = (h - b.getHeight() * scale) * 0.25f;   // 0 = top edge, 0.5 = centre
-        android.graphics.Matrix m = new android.graphics.Matrix();
-        m.setScale(scale, scale);
-        m.postTranslate(dx, dy);
-        return m;
+    private final Runnable advanceRun = this::advance;
+
+    /** dir = 1 for the next picture, -1 for the previous one (from the history). */
+    private void step(int dir) {
+        if (urls == null) return;
+        ui.removeCallbacks(advanceRun);
+        if (dir < 0 && histPos <= 0) {
+            scheduleNext();
+        } else if (dir < 0 || histPos < history.size() - 1) {
+            final int target = histPos + dir;
+            io.execute(() -> {
+                final Bitmap b = download(history.get(target));
+                ui.post(() -> {
+                    if (!alive) return;
+                    if (b != null) {
+                        histPos = target;
+                        display(b);
+                    }
+                    scheduleNext();
+                });
+            });
+        } else {
+            advance();
+        }
+    }
+
+    private void scheduleNext() {
+        if (!paused) ui.postDelayed(advanceRun, SHOW_MS);
     }
 
     private void advance() {
         if (!alive) return;
         if (ready == null) {
-            ui.postDelayed(this::advance, 800);
+            prefetch();
+            ui.postDelayed(advanceRun, 800);
             return;
         }
         Bitmap next = ready;
+        history.add(readyUrl);
+        histPos = history.size() - 1;
         ready = null;
+        display(next);
+        prefetch();
+        scheduleNext();
+    }
+
+    /** Fills the screen like center-crop, but keeps the upper part of tall pictures so heads stay in frame. */
+    private Matrix cropMatrix(Bitmap b) {
+        float scale = Math.max(w / (float) b.getWidth(), h / (float) b.getHeight());
+        float dx = (w - b.getWidth() * scale) / 2f;
+        float dy = (h - b.getHeight() * scale) * 0.25f;   // 0 = top edge, 0.5 = centre
+        Matrix m = new Matrix();
+        m.setScale(scale, scale);
+        m.postTranslate(dx, dy);
+        return m;
+    }
+
+    /** Crossfades the new picture in over the current one, with a slow zoom. */
+    private void display(Bitmap next) {
         // the view that is currently hidden gets the new picture and fades in over the other one
-        ImageView in = back, out = front;
-        Bitmap old = out.getDrawable() instanceof android.graphics.drawable.BitmapDrawable
-                ? ((android.graphics.drawable.BitmapDrawable) out.getDrawable()).getBitmap() : null;
+        final ImageView in = back, out = front;
+        final Bitmap old = out.getDrawable() instanceof BitmapDrawable ? ((BitmapDrawable) out.getDrawable()).getBitmap() : null;
+        in.animate().cancel();
         in.setImageBitmap(next);
         in.setImageMatrix(cropMatrix(next));
         in.setScaleX(1f);
         in.setScaleY(1f);
         in.setAlpha(0f);
         in.bringToFront();
-        View info = (View) clock.getParent();
-        info.bringToFront();
+        ((View) clock.getParent()).bringToFront();
         message.bringToFront();
+        controls.bringToFront();
         in.animate().alpha(1f).setDuration(FADE_MS).setInterpolator(new LinearInterpolator()).withEndAction(() -> {
             out.setAlpha(0f);
             out.setImageDrawable(null);
             if (old != null && old != next) old.recycle();
         }).start();
-        android.animation.ObjectAnimator zx = android.animation.ObjectAnimator.ofFloat(in, View.SCALE_X, 1f, 1.08f);
-        android.animation.ObjectAnimator zy = android.animation.ObjectAnimator.ofFloat(in, View.SCALE_Y, 1f, 1.08f);
-        zx.setDuration(SHOW_MS + FADE_MS);
-        zy.setDuration(SHOW_MS + FADE_MS);
-        zx.setInterpolator(new LinearInterpolator());
-        zy.setInterpolator(new LinearInterpolator());
-        zx.start();
-        zy.start();
+        ObjectAnimator zx = ObjectAnimator.ofFloat(in, View.SCALE_X, 1f, 1.08f);
+        ObjectAnimator zy = ObjectAnimator.ofFloat(in, View.SCALE_Y, 1f, 1.08f);
+        for (ObjectAnimator z : new ObjectAnimator[]{zx, zy}) {
+            z.setDuration(SHOW_MS + FADE_MS);
+            z.setInterpolator(new LinearInterpolator());
+            z.start();
+        }
         front = in;
         back = out;
-        prefetch();
-        ui.postDelayed(this::advance, SHOW_MS);
     }
 }

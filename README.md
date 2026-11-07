@@ -138,6 +138,10 @@ adb shell settings put secure screensaver_components com.adam.nowplaying/com.ada
 
 Use `com.adam.nowplaying.NowPlayingDream` instead to go back to the Now Playing screensaver.
 
+Controls: swipe left or right for the next or previous picture; tap for a control bar (previous,
+pause photos, next, Now Playing, Exit, plus music controls while something is loaded); double-tap
+to open Now Playing.
+
 ### 3. Library, search and device picker (optional)
 
 Link your Spotify developer app and start the one-time sign-in; Firefox opens on the Echo, and
