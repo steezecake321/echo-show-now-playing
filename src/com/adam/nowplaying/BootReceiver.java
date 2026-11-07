@@ -8,5 +8,7 @@ public class BootReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context ctx, Intent intent) {
         PlayerService.start(ctx);
+        Timers.init(ctx);
+        Timers.scheduleAlarm(ctx);
     }
 }

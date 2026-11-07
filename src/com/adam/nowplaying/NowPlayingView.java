@@ -36,7 +36,13 @@ final class NowPlayingView extends FrameLayout implements PlayerState.Listener {
     private ImageView backdrop;
     private View dim;
     private Drawable aurora;
+    /** Big-clock mode: shows the clock even while music plays; a tap on it goes back to the player. */
+    static boolean clockMode;
+
     private View idlePanel, playerPanel, statusDot;
+    private TextView timersLine;
+    private LinearLayout presetRow;
+    private String presetsShown = "";
     private TextView bigClock, dateView, idleStatus, smallClock;
     private ImageView artView;
     private TextView titleView, artistView, elapsedView, totalView, nowLabel, deviceName, topName;
@@ -216,13 +222,30 @@ final class NowPlayingView extends FrameLayout implements PlayerState.Listener {
         dateView.setLetterSpacing(0.14f);
         idleStatus = text(15, white(150), "sans-serif", Typeface.NORMAL, 2);
         idleStatus.setGravity(Gravity.CENTER);
-        idle.addView(bigClock);
+        bigClock.setGravity(Gravity.CENTER_HORIZONTAL);
+        idle.addView(bigClock, new LinearLayout.LayoutParams(-1, -2));
         LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(-2, -2);
         dlp.topMargin = dp(14);
         idle.addView(dateView, dlp);
         LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-2, -2);
         slp.topMargin = dp(18);
         idle.addView(idleStatus, slp);
+        timersLine = text(17, white(220), "sans-serif-medium", Typeface.NORMAL, 2);
+        timersLine.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams idleTlp = new LinearLayout.LayoutParams(-2, -2);
+        idleTlp.topMargin = dp(12);
+        idle.addView(timersLine, idleTlp);
+        presetRow = new LinearLayout(ctx);
+        presetRow.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams idlePlp = new LinearLayout.LayoutParams(-2, -2);
+        idlePlp.topMargin = dp(18);
+        idle.addView(presetRow, idlePlp);
+        idle.setOnClickListener(v -> {
+            if (clockMode) {
+                clockMode = false;
+                onStateChanged();
+            }
+        });
         idlePanel = idle;
         addView(idle, new LayoutParams(-1, -1));
 
@@ -390,6 +413,8 @@ final class NowPlayingView extends FrameLayout implements PlayerState.Listener {
         String time = DateFormat.format(DateFormat.is24HourFormat(getContext()) ? "H:mm" : "h:mm", now).toString();
         bigClock.setText(time);
         smallClock.setText(time);
+        updateTimersLine();
+        applyPanels();
         dateView.setText(DateFormat.format("EEEE  ·  MMMM d", now).toString().toUpperCase(Locale.getDefault()));
         if (state.durationMs > 0 && !progress.isDragging()) {
             long pos = state.currentPosition();
@@ -398,18 +423,77 @@ final class NowPlayingView extends FrameLayout implements PlayerState.Listener {
         }
     }
 
+    private void applyPanels() {
+        boolean track = state.connected && state.hasTrack() && !clockMode;
+        int idleVis = track ? GONE : VISIBLE;
+        if (idlePanel.getVisibility() != idleVis) {
+            idlePanel.setVisibility(idleVis);
+            playerPanel.setVisibility(track ? VISIBLE : GONE);
+            smallClock.setVisibility(track ? VISIBLE : INVISIBLE);
+            if (!track) refreshPresets();
+        }
+    }
+
+    private void updateTimersLine() {
+        if (idlePanel.getVisibility() != VISIBLE) return;
+        Context c = getContext();
+        long now = System.currentTimeMillis();
+        StringBuilder sb = new StringBuilder();
+        for (Timers.Kitchen k : Timers.kitchen) {
+            if (sb.length() > 0) sb.append("     ");
+            sb.append("Timer ").append(Ui.clock(Math.max(0, (k.endMs - now + 999) / 1000)));
+        }
+        if (Timers.sleepEndMs > 0) {
+            if (sb.length() > 0) sb.append("     ");
+            sb.append("Sleep ").append(Ui.clock(Math.max(0, (Timers.sleepEndMs - now) / 1000)));
+        }
+        long alarm = Timers.nextAlarmMs(c);
+        if (alarm > 0) {
+            if (sb.length() > 0) sb.append("     ");
+            sb.append("Alarm ").append(DateFormat.format(DateFormat.is24HourFormat(c) ? "EEE H:mm" : "EEE h:mm a", alarm));
+        }
+        timersLine.setText(sb);
+        timersLine.setVisibility(sb.length() == 0 ? GONE : VISIBLE);
+    }
+
+    /** One-tap buttons for pinned playlists, shown on the idle clock when nothing is playing. */
+    private void refreshPresets() {
+        Context c = getContext();
+        java.util.List<Pins.Pin> pins = Pins.list(c);
+        StringBuilder key = new StringBuilder();
+        for (int i = 0; i < pins.size() && i < 4; i++) key.append(pins.get(i).uri);
+        boolean show = !clockMode && !state.hasTrack() && state.connected && state.loggedIn && SpotifyWebApi.isSignedIn(c);
+        if (!show) key.setLength(0);
+        if (key.toString().equals(presetsShown) && presetRow.getChildCount() > 0 == (key.length() > 0)) return;
+        presetsShown = key.toString();
+        presetRow.removeAllViews();
+        if (key.length() == 0) return;
+        for (int i = 0; i < pins.size() && i < 4; i++) {
+            final Pins.Pin pin = pins.get(i);
+            TextView pill = Ui.pill(c, pin.title, false);
+            pill.setMaxWidth(dp(200));
+            pill.setOnClickListener(v -> SpotifyWebApi.playOnEcho(c, "{\"context_uri\":\"" + pin.uri + "\"}", (ok, err) -> { }));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+            lp.leftMargin = dp(5);
+            lp.rightMargin = dp(5);
+            presetRow.addView(pill, lp);
+        }
+    }
+
     @Override
     public void onStateChanged() {
-        boolean track = state.connected && state.hasTrack();
+        boolean track = state.connected && state.hasTrack() && !clockMode;
         idlePanel.setVisibility(track ? GONE : VISIBLE);
         playerPanel.setVisibility(track ? VISIBLE : GONE);
         smallClock.setVisibility(track ? VISIBLE : INVISIBLE);
+        if (!track) refreshPresets();
 
         topName.setText(state.deviceName);
         boolean ready = state.connected && state.loggedIn;
         ((GradientDrawable) statusDot.getBackground()).setColor(ready ? GREEN : AMBER);
         if (!state.connected) idleStatus.setText("Starting the speaker…");
         else if (!state.loggedIn) idleStatus.setText("Waiting for Spotify");
+        else if (state.hasTrack()) idleStatus.setText(state.trackName + "  ·  " + state.artists);
         else idleStatus.setText("Ready for Spotify");
 
         if (track) {

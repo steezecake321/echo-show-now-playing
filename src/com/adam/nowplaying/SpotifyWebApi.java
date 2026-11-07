@@ -33,7 +33,11 @@ final class SpotifyWebApi {
 
     static final String REDIRECT = "http://127.0.0.1:8888/callback";
     private static final int PORT = 8888;
-    private static final String SCOPES = "user-read-playback-state user-modify-playback-state";
+    /** Bump when SCOPES grows: older sign-ins then ask the user to sign in again. */
+    private static final int SCOPES_VERSION = 2;
+    private static final String SCOPES = "user-read-playback-state user-modify-playback-state "
+            + "user-library-read user-library-modify playlist-read-private playlist-read-collaborative "
+            + "user-read-recently-played user-top-read user-follow-read";
 
     static final class Device {
         String id, name, type;
@@ -62,6 +66,11 @@ final class SpotifyWebApi {
 
     static boolean isSignedIn(Context c) {
         return prefs(c).getString("refresh_token", null) != null;
+    }
+
+    /** True when the stored sign-in was granted the library/search scopes. */
+    static boolean hasLibraryAccess(Context c) {
+        return isSignedIn(c) && prefs(c).getInt("scopes_v", 1) >= SCOPES_VERSION;
     }
 
     // ---------- sign-in ----------
@@ -162,7 +171,8 @@ final class SpotifyWebApi {
                         respond(sock, 500, "Sign-in failed: " + tokenErr);
                         continue;
                     }
-                    p.edit().remove("login_state").remove("login_verifier").remove("login_started").commit();
+                    p.edit().remove("login_state").remove("login_verifier").remove("login_started")
+                            .putInt("scopes_v", SCOPES_VERSION).commit();
                     respond(sock, 200, "Signed in to Spotify. Returning to Now Playing…");
                     main.post(() -> app.startActivity(new Intent(app, MainActivity.class)
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
@@ -262,6 +272,7 @@ final class SpotifyWebApi {
             c.setConnectTimeout(10000);
             c.setReadTimeout(10000);
             c.setRequestProperty("Authorization", "Bearer " + tok);
+            if (json == null && (method.equals("PUT") || method.equals("POST"))) json = "";
             if (json != null) {
                 c.setDoOutput(true);
                 c.setRequestProperty("Content-Type", "application/json");
@@ -369,6 +380,125 @@ final class SpotifyWebApi {
             final String err = error;
             main.post(() -> cb.done(err == null, err));
         });
+    }
+
+    // ---------- generic calls used by the library, queue, search and alarm ----------
+
+    /** GET path (e.g. "/me/playlists?limit=50"); result is the parsed JSON object. error "signin" means sign in again. */
+    static void getJson(Context ctx, String path, Callback<JSONObject> cb) {
+        final Context app = ctx.getApplicationContext();
+        io.execute(() -> {
+            JSONObject out = null;
+            String error = null;
+            try {
+                Object[] r = call(app, "GET", path, null);
+                int status = (Integer) r[0];
+                if (status == 200) {
+                    String body = ((String) r[1]).trim();
+                    out = body.startsWith("[") ? new JSONObject().put("_array", new JSONArray(body)) : new JSONObject(body);
+                } else if (status == 204) out = new JSONObject();
+                else error = describe(status, (String) r[1]);
+            } catch (Exception e) {
+                error = "Couldn't reach Spotify (" + e.getClass().getSimpleName() + ")";
+            }
+            final JSONObject result = out;
+            final String err = error;
+            main.post(() -> cb.done(result, err));
+        });
+    }
+
+    /** PUT/POST/DELETE with an optional JSON body. */
+    static void send(Context ctx, String method, String path, String json, Callback<Boolean> cb) {
+        final Context app = ctx.getApplicationContext();
+        io.execute(() -> {
+            String error = sendNow(app, method, path, json);
+            main.post(() -> cb.done(error == null, error));
+        });
+    }
+
+    private static String sendNow(Context app, String method, String path, String json) {
+        try {
+            Object[] r = call(app, method, path, json);
+            int status = (Integer) r[0];
+            if (status >= 200 && status < 300) return null;
+            return describe(status, (String) r[1]);
+        } catch (Exception e) {
+            return "Couldn't reach Spotify (" + e.getClass().getSimpleName() + ")";
+        }
+    }
+
+    private static String describe(int status, String body) {
+        if (status == 401) return "signin";
+        String msg = body;
+        try {
+            JSONObject e = new JSONObject(body).optJSONObject("error");
+            if (e != null) msg = e.optString("message", body);
+        } catch (Exception ignored) {
+        }
+        if (status == 403) return "Spotify refused this (403). " + msg;
+        if (status == 429) return "Spotify is busy, try again in a moment.";
+        return "Spotify said " + status + ": " + msg;
+    }
+
+    /**
+     * Plays on this Echo: finds the Echo among the Connect devices, wakes/transfers to it if needed,
+     * then starts playback. body is the /me/player/play JSON ({"context_uri":..} or {"uris":[..]}), or null to resume.
+     */
+    static void playOnEcho(Context ctx, String body, Callback<Boolean> cb) {
+        playOnEcho(ctx, body, false, cb);
+    }
+
+    /** exact: start precisely the first item even when shuffle is on (shuffle is switched off, then back on). */
+    static void playOnEcho(Context ctx, String body, final boolean exact, Callback<Boolean> cb) {
+        final Context app = ctx.getApplicationContext();
+        final boolean shuffled = PlayerState.get().shuffle;
+        io.execute(() -> {
+            String error = null;
+            try {
+                String wanted = PlayerState.get().deviceName;
+                Object[] r = call(app, "GET", "/me/player/devices", null);
+                if ((Integer) r[0] != 200) {
+                    error = describe((Integer) r[0], (String) r[1]);
+                } else {
+                    JSONArray arr = new JSONObject((String) r[1]).optJSONArray("devices");
+                    String id = null;
+                    boolean active = false;
+                    for (int i = 0; arr != null && i < arr.length(); i++) {
+                        JSONObject d = arr.getJSONObject(i);
+                        if (wanted.equals(d.optString("name"))) {
+                            id = d.optString("id", null);
+                            active = d.optBoolean("is_active");
+                        }
+                    }
+                    if (id == null) {
+                        error = "Spotify can't see this Echo yet. Wait a few seconds and try again.";
+                    } else {
+                        if (!active) {
+                            error = sendNow(app, "PUT", "/me/player", "{\"device_ids\":[\"" + id + "\"],\"play\":false}");
+                            if (error == null) Thread.sleep(1200);
+                        }
+                        if (error == null && exact && shuffled) {
+                            sendNow(app, "PUT", "/me/player/shuffle?state=false&device_id=" + id, null);
+                        }
+                        if (error == null) {
+                            error = sendNow(app, "PUT", "/me/player/play?device_id=" + id, body == null ? "{}" : body);
+                        }
+                        if (error == null && exact && shuffled) {
+                            Thread.sleep(900);
+                            sendNow(app, "PUT", "/me/player/shuffle?state=true&device_id=" + id, null);
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                error = "Couldn't reach Spotify (" + e.getClass().getSimpleName() + ")";
+            }
+            final String err = error;
+            main.post(() -> cb.done(err == null, err));
+        });
+    }
+
+    static String urlEncode(String s) {
+        return enc(s);
     }
 
     // ---------- helpers ----------

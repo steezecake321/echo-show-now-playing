@@ -8,8 +8,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 [ -f local.env ] && . ./local.env
 
-VERSION_CODE=13
-VERSION_NAME=1.0.0
+VERSION_CODE=14
+VERSION_NAME=1.1.0
 
 SDK=${ANDROID_SDK:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}}
 [ -n "$SDK" ] || { echo "Set ANDROID_SDK to your Android SDK folder (or put it in local.env)" >&2; exit 1; }
